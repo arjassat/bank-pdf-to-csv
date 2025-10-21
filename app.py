@@ -5,8 +5,17 @@ import io
 import re
 from PIL import Image
 import pytesseract
+import numpy as np
+from pdf2image import convert_from_bytes
 
-# For Streamlit Sharing, tesseract is installed via packages.txt
+# For Streamlit Sharing, tesseract and other dependencies are installed via packages.txt
+
+def preprocess_image(image):
+    # Convert to grayscale and enhance contrast for better OCR
+    img = image.convert('L')
+    img = np.array(img)
+    img = (255 - img)  # Invert if needed
+    return Image.fromarray(img)
 
 def detect_bank(text):
     text_lower = text.lower()
@@ -33,33 +42,38 @@ def clean_description(desc):
 def extract_and_parse_pdf(pdf_file):
     transactions = []
     text = ''
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + '\n'
-            tables = page.extract_tables()
-            if tables:
-                for table in tables:
-                    transactions += process_table(table)
-            if not page_text or not tables:  # OCR if no text/tables
-                img = page.to_image(resolution=300)
-                ocr_text = pytesseract.image_to_string(img.original)
-                text += ocr_text + '\n'
-    if not transactions and text:  # Fallback to line-based if no tables
-        transactions = fallback_line_parser(text)
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + '\n'
+                tables = page.extract_tables()
+                if tables:
+                    for table in tables:
+                        transactions += process_table(table, detect_bank(text))
+                if not page_text or not tables:  # OCR if no text/tables
+                    images = convert_from_bytes(pdf_file.read())
+                    for img in images:
+                        preprocessed_img = preprocess_image(img)
+                        ocr_text = pytesseract.image_to_string(preprocessed_img)
+                        text += ocr_text + '\n'
+        if not transactions and text:  # Fallback to line-based if no tables
+            transactions = fallback_line_parser(text, detect_bank(text))
+    except Exception as e:
+        st.error(f"Error processing PDF: {str(e)}")
     return transactions
 
-def process_table(table):
+def process_table(table, bank):
     trans = []
     if len(table) < 2:
         return trans
     headers = [str(h).lower() if h else '' for h in table[0]]
     date_col = next((i for i, h in enumerate(headers) if 'date' in h), None)
     desc_col = next((i for i, h in enumerate(headers) if 'detail' in h or 'descrip' in h or 'particular' in h or 'history' in h), 0)
+    amount_col = next((i for i, h in enumerate(headers) if 'amount' in h or 'transaction amount' in h), None)
     debit_col = next((i for i, h in enumerate(headers) if 'debit' in h), None)
     credit_col = next((i for i, h in enumerate(headers) if 'credit' in h), None)
-    amount_col = next((i for i, h in enumerate(headers) if 'amount' in h or 'transaction amount' in h), None)
     if date_col is None:
         return trans
     for row in table[1:]:
@@ -70,28 +84,55 @@ def process_table(table):
         desc = row[desc_col].strip() if desc_col < len(row) else ''
         if not date or not desc:
             continue
-        if amount_col is not None and amount_col < len(row):
-            amount_str = row[amount_col].replace(' ', '').strip()
-            sign = -1 if amount_str.endswith('-') or 'Dr' in amount_str else 1
-            amount_str = re.sub(r'[^\d.]', '', amount_str)  # Remove non-numbers
-            try:
-                amount = float(amount_str) * sign
-            except ValueError:
-                continue
-        elif debit_col is not None and credit_col is not None and debit_col < len(row) and credit_col < len(row):
-            debit_str = row[debit_col].replace(',', '').replace(' ', '').strip() or '0'
-            credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
-            try:
-                amount = float(credit_str) - float(debit_str)
-            except ValueError:
-                continue
+        if bank == 'fnb' or bank == 'absa':
+            if amount_col is not None and amount_col < len(row):
+                amount_str = row[amount_col].replace(' ', '').strip()
+                sign = -1 if amount_str.endswith('-') or 'Dr' in amount_str else 1
+                amount_str = re.sub(r'[^\d.]', '', amount_str)
+                try:
+                    amount = float(amount_str) * sign
+                except ValueError:
+                    continue
+            elif debit_col is not None and credit_col is not None and debit_col < len(row) and credit_col < len(row):
+                debit_str = row[debit_col].replace(',', '').replace(' ', '').strip() or '0'
+                credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
+                try:
+                    amount = float(credit_str) - float(debit_str)
+                except ValueError:
+                    continue
+        elif bank == 'standard':
+            if debit_col is not None and debit_col < len(row):
+                debit_str = row[debit_col].replace(',', '').replace(' ', '').strip() or '0'
+                try:
+                    amount = -float(debit_str) if debit_str else 0
+                except ValueError:
+                    continue
+            elif credit_col is not None and credit_col < len(row):
+                credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
+                try:
+                    amount = float(credit_str) if credit_str else 0
+                except ValueError:
+                    continue
+        elif bank == 'hbz':
+            if debit_col is not None and debit_col < len(row):
+                debit_str = row[debit_col].replace(',', '').strip() or '0'
+                try:
+                    amount = -float(debit_str) if debit_str else 0
+                except ValueError:
+                    continue
+            elif credit_col is not None and credit_col < len(row):
+                credit_str = row[credit_col].replace(',', '').strip() or '0'
+                try:
+                    amount = float(credit_str) if credit_str else 0
+                except ValueError:
+                    continue
         else:
             continue
         clean_desc = clean_description(desc)
         trans.append((date, clean_desc, amount))
     return trans
 
-def fallback_line_parser(text):
+def fallback_line_parser(text, bank):
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     trans = []
     current_date = ''
@@ -99,26 +140,22 @@ def fallback_line_parser(text):
     current_amount = 0
     in_transaction_history = False
     for line in lines:
-        # Detect start of transaction history (specific to ABSA)
-        if 'transaction history' in line.lower():
+        if bank == 'absa' and 'transaction history' in line.lower():
             in_transaction_history = True
             continue
-        if not in_transaction_history:
+        if not in_transaction_history and bank != 'absa':
             continue
-        # Detect date like '2 Sep 2024' or '02 17'
-        date_match = re.match(r'^(\d{1,2} [A-Za-z]{3} \d{4}|\d{2} \d{2})$', line)
+        date_match = re.match(r'^(\d{1,2} [A-Za-z]{3} \d{4}|\d{2} \d{2}|\d{1,2} [A-Za-z]{3})$', line)
         if date_match:
             if current_desc:
                 desc = clean_description(' '.join(current_desc))
                 trans.append((current_date, desc, current_amount))
             current_date = date_match.group(0)
             current_desc = []
-        # Detect amount like '4,000.00-' or '10,600.00'
         elif re.match(r'^[\d,]+\.\d{2}[-]?$', line):
             sign = -1 if line.endswith('-') else 1
             amount_str = re.sub(r'[^\d.]', '', line)
             current_amount = float(amount_str) * sign
-        # Detect description lines (anything else after date)
         elif current_date and not re.match(r'^\d{1,3}(?:,\d{3})*\.\d{2}$', line):  # Exclude balance-like lines
             current_desc.append(line)
     if current_desc:
@@ -143,4 +180,4 @@ if uploaded_file is not None:
         st.success(f"Extracted {len(transactions)} transactions!")
         st.download_button("Download CSV", output.getvalue(), "bank_transactions.csv", "text/csv")
     else:
-        st.error("No transactions found. Ensure it's a valid bank statement or try another file.")
+        st.error("No transactions found. Ensure it's a valid bank statement or try another file. If the issue persists, please upload a different format or contact support.")
