@@ -2,4 +2,4 @@ streamlit
 pdfplumber
 pillow
 pytesseract
-pdf2image
+pymupdf
