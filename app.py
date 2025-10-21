@@ -81,15 +81,154 @@ def extract_and_parse_pdf(pdf_file):
 
     return transactions
 
-# Rest of the code (process_table, fallback_line_parser, st UI) remains the same as your previous version.
+def process_table(table, bank):
+    trans = []
+    if len(table) < 2:
+        return trans
+    headers = [str(h).lower() if h else '' for h in table[0]]
+    date_col = next((i for i, h in enumerate(headers) if 'date' in h), None)
+    desc_col = next((i for i, h in enumerate(headers) if 'detail' in h or 'descrip' in h or 'particular' in h or 'history' in h), 0)
+    amount_col = next((i for i, h in enumerate(headers) if 'amount' in h or 'transaction amount' in h), None)
+    debit_col = next((i for i, h in enumerate(headers) if 'debit' in h), None)
+    credit_col = next((i for i, h in enumerate(headers) if 'credit' in h), None)
+    if date_col is None:
+        return trans
+    for row in table[1:]:
+        row = [str(r) if r else '' for r in row]
+        if not any(row):
+            continue
+        date = row[date_col].strip() if date_col < len(row) else ''
+        desc = row[desc_col].strip() if desc_col < len(row) else ''
+        if not date or not desc:
+            continue
+        if bank == 'fnb' or bank == 'absa':
+            if amount_col is not None and amount_col < len(row):
+                amount_str = row[amount_col].replace(' ', '').strip()
+                sign = -1 if amount_str.endswith('-') or 'Dr' in amount_str or 'Dr' in row[amount_col] else 1
+                amount_str = re.sub(r'[^\d.]', '', amount_str)
+                try:
+                    amount = float(amount_str) * sign
+                except ValueError:
+                    continue
+            elif debit_col is not None and credit_col is not None and debit_col < len(row) and credit_col < len(row):
+                debit_str = row[debit_col].replace(',', '').replace(' ', '').strip() or '0'
+                credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
+                try:
+                    amount = float(credit_str) - float(debit_str)
+                except ValueError:
+                    continue
+            else:
+                continue
+        elif bank == 'standard':
+            if debit_col is not None and debit_col < len(row):
+                debit_str = row[debit_col].replace(',', '').replace(' ', '').strip() or '0'
+                try:
+                    amount = -float(debit_str) if debit_str else 0
+                except ValueError:
+                    continue
+            elif credit_col is not None and credit_col < len(row):
+                credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
+                try:
+                    amount = float(credit_str) if credit_str else 0
+                except ValueError:
+                    continue
+            else:
+                continue
+        elif bank == 'hbz':
+            if debit_col is not None and debit_col < len(row):
+                debit_str = row[debit_col].replace(',', '').strip() or '0'
+                try:
+                    amount = -float(debit_str) if debit_str else 0
+                except ValueError:
+                    continue
+            elif credit_col is not None and credit_col < len(row):
+                credit_str = row[credit_col].replace(',', '').strip() or '0'
+                try:
+                    amount = float(credit_str) if credit_str else 0
+                except ValueError:
+                    continue
+            else:
+                continue
+        else:
+            continue
+        clean_desc = clean_description(desc)
+        trans.append((date, clean_desc, amount))
+    return trans
+
+def fallback_line_parser(text, bank):
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    trans = []
+    current_date = ''
+    current_desc = []
+    current_amount = 0.0
+    in_transaction_history = False
+    for line in lines:
+        if 'transaction history' in line.lower():
+            in_transaction_history = True
+            continue
+        if not in_transaction_history:
+            continue
+        # Match full line patterns for ABSA
+        match = re.match(r'(\d{1,2} [A-Za-z]{3} \d{4})\s+(.*?)\s+([\d ,]+\.\d{2}-?)\s*([\d ,]+\.\d{2})?$', line)
+        if match:
+            if current_desc:
+                desc = clean_description(' '.join(current_desc))
+                trans.append((current_date, desc, current_amount))
+            current_date = match.group(1)
+            current_desc = [match.group(2)]
+            amount_str = match.group(3).replace(' ', '').replace(',', '')
+            sign = -1 if amount_str.endswith('-') else 1
+            current_amount = float(amount_str.rstrip('-')) * sign
+            continue
+        # For service fees on next line
+        fee_match = re.match(r'Service Fee\s+([\d .]+-)', line)
+        if fee_match:
+            amount_str = fee_match.group(1).replace(' ', '').replace(',', '')
+            sign = -1 if amount_str.endswith('-') else 1
+            fee_amount = float(amount_str.rstrip('-')) * sign
+            current_amount += fee_amount  # Subtract fee from previous amount
+            current_desc.append('Service Fee')
+            continue
+        # For other banks like Standard
+        date_match = re.match(r'^(\d{2} \d{2})', line)
+        if date_match:
+            if current_desc:
+                desc = clean_description(' '.join(current_desc))
+                trans.append((current_date, desc, current_amount))
+            current_date = date_match.group(1)
+            # The rest of the line is desc and amount
+            rest = line[date_match.end():]
+            amount_match = re.search(r'([\d,]+\.\d{2}-?)$', rest)
+            if amount_match:
+                desc = rest[:amount_match.start()].strip()
+                amount_str = amount_match.group(1).replace(',', '')
+                sign = -1 if amount_str.endswith('-') else 1
+                current_amount = float(amount_str.rstrip('-')) * sign
+                current_desc = [desc]
+            else:
+                current_desc = [rest.strip()]
+        elif current_date:
+            amount_match = re.search(r'([\d,]+\.\d{2}-?)$', line)
+            if amount_match:
+                desc = line[:amount_match.start()].strip()
+                amount_str = amount_match.group(1).replace(',', '')
+                sign = -1 if amount_str.endswith('-') else 1
+                current_amount = float(amount_str.rstrip('-')) * sign
+                current_desc.append(desc)
+            else:
+                current_desc.append(line)
+    if current_desc:
+        desc = clean_description(' '.join(current_desc))
+        trans.append((current_date, desc, current_amount))
+    return trans
 
 st.title("Bank Statement PDF to CSV Converter")
-st.write("Upload your South African bank statement PDF (supports Standard Bank, FNB, HBZ, ABSA, scanned/normal/corrupt). Get a clean CSV for Xero.")
+st.write("Upload your South African bank statement PDF (supports Standard Bank, FNB, HBZ, ABSA, scanned/normal). Get a clean CSV for Xero.")
 
 uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
 if uploaded_file is not None:
-    with st.spinner("Processing PDF... (may take time for scanned or corrupt files)"):
+    with st.spinner("Processing PDF... (may take time for scanned files)"):
         transactions = extract_and_parse_pdf(uploaded_file)
     if transactions:
         output = io.StringIO()
@@ -100,4 +239,4 @@ if uploaded_file is not None:
         st.success(f"Extracted {len(transactions)} transactions!")
         st.download_button("Download CSV", output.getvalue(), "bank_transactions.csv", "text/csv")
     else:
-        st.error("No transactions found. Ensure it's a valid bank statement or try another file. If the PDF is corrupt, repair it using tools like MuPDF's 'mutool clean'.")
+        st.error("No transactions found. Ensure it's a valid bank statement or try another file.")
