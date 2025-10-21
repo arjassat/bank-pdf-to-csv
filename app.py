@@ -61,7 +61,7 @@ def extract_and_parse_pdf(pdf_file):
 
         bank = detect_bank(text)
 
-        # Try pdfplumber for table extraction (may fail on corrupt PDFs)
+        # Try pdfplumber for table extraction
         try:
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 for p in pdf.pages:
@@ -117,7 +117,7 @@ def process_table(table, bank):
                 credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
                 try:
                     amount = float(credit_str) - float(debit_str)
-                except ValueValueError:
+                except ValueError:
                     continue
             else:
                 continue
@@ -171,7 +171,7 @@ def fallback_line_parser(text, bank):
         if not in_transaction_history:
             continue
         if bank == 'absa':
-            line_match = re.match(r'(\d{1,2} [A-Za-z]{3}( \d{4})?)\s+(.*?)\s+([\d ,]+\.\d{2}-?)\s*([\d ,]+\.\d{2})?$', line)
+            line_match = re.match(r'(\d{1,2} [A-Za-z]{3}( \d{4})?)\s+(.+?)\s+([\d ,]+\.\d{2}-?)\s*([\d ,]+\.\d{2})?$', line)
             if line_match:
                 if current_desc:
                     desc = clean_description(' '.join(current_desc))
@@ -193,22 +193,27 @@ def fallback_line_parser(text, bank):
                 amount_str = fee_match.group(1).replace(' ', '').replace(',', '')
                 sign = -1 if amount_str.endswith('-') else 1
                 current_amount = float(amount_str.rstrip('-')) * sign
+                trans.append((current_date, 'Service Fee', current_amount))
+                current_desc = []
                 continue
             if 'balance' in line.lower():
                 continue
             if current_date:
                 current_desc.append(line)
         elif bank == 'standard':
-            line_match = re.match(r'(\d{2} \d{2})\s+(.*?)\s*(##)?\s*([\d,]+\.\d{2}-?)\s*([\d,]+\.\d{2})?', line)
+            line_match = re.match(r'(.+?)\s*(##)?\s*([\d,]+\.\d{2}-?)?\s*(\d{2} \d{2})\s*([\d,]+\.\d{2})?', line)
             if line_match:
                 if current_desc:
                     desc = clean_description(' '.join(current_desc))
                     trans.append((current_date, desc, current_amount))
-                current_date = line_match.group(1)
-                current_desc = [line_match.group(2)]
-                amount_str = line_match.group(4).replace(',', '')
-                sign = -1 if amount_str.endswith('-') else 1
-                current_amount = float(amount_str.rstrip('-')) * sign
+                current_desc = [line_match.group(1)]
+                if line_match.group(3):
+                    amount_str = line_match.group(3).replace(',', '')
+                    sign = -1 if amount_str.endswith('-') else 1
+                    current_amount = float(amount_str.rstrip('-')) * sign
+                else:
+                    current_amount = 0.0
+                current_date = line_match.group(4)
                 if 'balance brought forward' in ' '.join(current_desc).lower():
                     current_amount = 0.0
                 continue
@@ -217,7 +222,7 @@ def fallback_line_parser(text, bank):
             if current_date:
                 current_desc.append(line)
         elif bank == 'fnb':
-            line_match = re.match(r'(\d{2} [A-Za-z]{3})\s+(.*?)\s+([\d,]+\.\d{2}(Cr)?)\s+([\d,]+\.\d{2}(Cr)?)', line)
+            line_match = re.match(r'(\d{2} [A-Za-z]{3})\s+(.+?)\s+([\d,]+\.\d{2}(Cr)?)\s+([\d,]+\.\d{2}(Cr)?)', line)
             if line_match:
                 if current_desc:
                     desc = clean_description(' '.join(current_desc))
@@ -233,7 +238,7 @@ def fallback_line_parser(text, bank):
             if current_date:
                 current_desc.append(line)
         elif bank == 'hbz':
-            line_match = re.match(r'([A-Za-z]{3} \d{2}, \d{4})\s+(.*?)(\s+[\d,]+\.\d{2})?(\s+[\d,]+\.\d{2})?$', line)
+            line_match = re.match(r'([A-Za-z]{3} \d{2}, \d{4})\s+(.+?)(\s+[\d,]+\.\d{2})?(\s+[\d,]+\.\d{2})?$', line)
             if line_match:
                 if current_desc:
                     desc = clean_description(' '.join(current_desc))
@@ -251,15 +256,10 @@ def fallback_line_parser(text, bank):
                 continue
             ref_match = re.match(r'Reference: (.*?)(\s+[\d,]+\.\d{2})?$', line)
             if ref_match and current_date:
-                if current_desc:
-                    desc = clean_description(' '.join(current_desc))
-                    trans.append((current_date, desc, current_amount))
-                current_desc = ['Reference: ' + ref_match.group(1)]
+                current_desc.append('Reference: ' + ref_match.group(1))
                 if ref_match.group(2):
                     amount_str = ref_match.group(2).strip().replace(',', '')
                     current_amount = -float(amount_str)
-                else:
-                    current_amount = 0.0
                 continue
             if 'balance' in line.lower():
                 continue
@@ -316,4 +316,4 @@ if uploaded_file is not None:
         st.success(f"Extracted {len(transactions)} transactions!")
         st.download_button("Download CSV", output.getvalue(), "bank_transactions.csv", "text/csv")
     else:
-        st.error("No transactions found. Ensure it's a valid bank statement or try another file. If the PDF is corrupt, repair it using tools like MuPDF mutool clean.")
+        st.error("""No transactions found. Ensure it's a valid bank statement or try another file. If the PDF is corrupt, repair it using tools like MuPDF's 'mutool clean'.""")
