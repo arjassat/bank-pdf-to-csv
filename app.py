@@ -117,7 +117,7 @@ def process_table(table, bank):
                 credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
                 try:
                     amount = float(credit_str) - float(debit_str)
-                except ValueError:
+                except ValueValueError:
                     continue
             else:
                 continue
@@ -199,16 +199,16 @@ def fallback_line_parser(text, bank):
             if current_date:
                 current_desc.append(line)
         elif bank == 'standard':
-            line_match = re.match(r'(.*?)\s*(##)?\s*([\d,]+\.\d{2}-?)\s*(\d{2} \d{2})\s*([\d,]+\.\d{2})', line)
+            line_match = re.match(r'(\d{2} \d{2})\s+(.*?)\s*(##)?\s*([\d,]+\.\d{2}-?)\s*([\d,]+\.\d{2})?', line)
             if line_match:
                 if current_desc:
                     desc = clean_description(' '.join(current_desc))
                     trans.append((current_date, desc, current_amount))
-                current_desc = [line_match.group(1)]
-                amount_str = line_match.group(3).replace(',', '')
+                current_date = line_match.group(1)
+                current_desc = [line_match.group(2)]
+                amount_str = line_match.group(4).replace(',', '')
                 sign = -1 if amount_str.endswith('-') else 1
                 current_amount = float(amount_str.rstrip('-')) * sign
-                current_date = line_match.group(4)
                 if 'balance brought forward' in ' '.join(current_desc).lower():
                     current_amount = 0.0
                 continue
@@ -316,6 +316,4 @@ if uploaded_file is not None:
         st.success(f"Extracted {len(transactions)} transactions!")
         st.download_button("Download CSV", output.getvalue(), "bank_transactions.csv", "text/csv")
     else:
-        st.error("No transactions found. Ensure it's a valid bank statement or try another file. If the PDF is corrupt, repair it using tools like MuPDF's 'mutool clean'.")", output.getvalue(), "bank_transactions.csv", "text/csv")
-    else:
-        st.error("No transactions found. Ensure it's a valid bank statement or try another file. If the PDF is corrupt, repair it using tools like MuPDF's 'mutool clean'.")
+        st.error("No transactions found. Ensure it's a valid bank statement or try another file. If the PDF is corrupt, repair it using tools like MuPDF mutool clean.")
