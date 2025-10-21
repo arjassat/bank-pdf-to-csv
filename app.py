@@ -105,6 +105,8 @@ def process_table(table, bank):
             if amount_col is not None and amount_col < len(row):
                 amount_str = row[amount_col].replace(' ', '').strip()
                 sign = -1 if amount_str.endswith('-') or 'Dr' in amount_str or 'Dr' in row[amount_col] else 1
+                if 'Cr' in amount_str:
+                    sign = 1
                 amount_str = re.sub(r'[^\d.]', '', amount_str)
                 try:
                     amount = float(amount_str) * sign
@@ -163,60 +165,135 @@ def fallback_line_parser(text, bank):
     current_amount = 0.0
     in_transaction_history = False
     for line in lines:
-        if 'transaction history' in line.lower():
+        if 'transaction history' in line.lower() or 'details' in line.lower() or 'particulars' in line.lower() or 'transactions' in line.lower():
             in_transaction_history = True
             continue
         if not in_transaction_history:
             continue
-        # Match full line patterns for ABSA
-        match = re.match(r'(\d{1,2} [A-Za-z]{3} \d{4})\s+(.*?)\s+([\d ,]+\.\d{2}-?)\s*([\d ,]+\.\d{2})?$', line)
-        if match:
-            if current_desc:
-                desc = clean_description(' '.join(current_desc))
-                trans.append((current_date, desc, current_amount))
-            current_date = match.group(1)
-            current_desc = [match.group(2)]
-            amount_str = match.group(3).replace(' ', '').replace(',', '')
-            sign = -1 if amount_str.endswith('-') else 1
-            current_amount = float(amount_str.rstrip('-')) * sign
-            continue
-        # For service fees on next line
-        fee_match = re.match(r'Service Fee\s+([\d .]+-)', line)
-        if fee_match:
-            amount_str = fee_match.group(1).replace(' ', '').replace(',', '')
-            sign = -1 if amount_str.endswith('-') else 1
-            fee_amount = float(amount_str.rstrip('-')) * sign
-            current_amount += fee_amount  # Subtract fee from previous amount
-            current_desc.append('Service Fee')
-            continue
-        # For other banks like Standard
-        date_match = re.match(r'^(\d{2} \d{2})', line)
-        if date_match:
-            if current_desc:
-                desc = clean_description(' '.join(current_desc))
-                trans.append((current_date, desc, current_amount))
-            current_date = date_match.group(1)
-            # The rest of the line is desc and amount
-            rest = line[date_match.end():]
-            amount_match = re.search(r'([\d,]+\.\d{2}-?)$', rest)
-            if amount_match:
-                desc = rest[:amount_match.start()].strip()
-                amount_str = amount_match.group(1).replace(',', '')
+        if bank == 'absa':
+            line_match = match(r'(\d{1,2} [A-Za-z]{3} \d{4})\s+(.*?)\s+([\d ,]+\.\d{2}-?)\s*([\d ,]+\.\d{2})?$', line)
+            if line_match:
+                if current_desc:
+                    desc = clean_description(' '.join(current_desc))
+                    trans.append((current_date, desc, current_amount))
+                current_date = line_match.group(1)
+                current_desc = [line_match.group(2)]
+                amount_str = line_match.group(3).replace(' ', '').replace(',', '')
                 sign = -1 if amount_str.endswith('-') else 1
                 current_amount = float(amount_str.rstrip('-')) * sign
-                current_desc = [desc]
-            else:
-                current_desc = [rest.strip()]
-        elif current_date:
-            amount_match = re.search(r'([\d,]+\.\d{2}-?)$', line)
-            if amount_match:
-                desc = line[:amount_match.start()].strip()
-                amount_str = amount_match.group(1).replace(',', '')
+                if 'balance brought forward' in ' '.join(current_desc).lower():
+                    current_amount = 0.0
+                continue
+            fee_match = match(r'Service Fee\s+([\d ,]+\.\d{2}-?)\s*([\d ,]+\.\d{2})?$', line)
+            if fee_match:
+                if current_desc:
+                    desc = clean_description(' '.join(current_desc))
+                    trans.append((current_date, desc, current_amount))
+                current_desc = ['Service Fee']
+                amount_str = fee_match.group(1).replace(' ', '').replace(',', '')
                 sign = -1 if amount_str.endswith('-') else 1
                 current_amount = float(amount_str.rstrip('-')) * sign
-                current_desc.append(desc)
-            else:
+                continue
+            if 'balance' in line.lower():
+                continue
+            if current_date:
                 current_desc.append(line)
+        elif bank == 'standard':
+            line_match = match(r'(.*?)\s*(##)?\s*([\d,]+\.\d{2}-?)\s*(\d{2} \d{2})\s*([\d,]+\.\d{2})', line)
+            if line_match:
+                if current_desc:
+                    desc = clean_description(' '.join(current_desc))
+                    trans.append((current_date, desc, current_amount))
+                current_desc = [line_match.group(1)]
+                amount_str = line_match.group(3).replace(',', '')
+                sign = -1 if amount_str.endswith('-') else 1
+                current_amount = float(amount_str.rstrip('-')) * sign
+                current_date = line_match.group(4)
+                if 'balance brought forward' in ' '.join(current_desc).lower():
+                    current_amount = 0.0
+                continue
+            if 'balance' in line.lower():
+                continue
+            if current_date:
+                current_desc.append(line)
+        elif bank == 'fnb':
+            line_match = match(r'(\d{2} [A-Za-z]{3})\s+(.*?)\s+([\d,]+\.\d{2}(Cr)?)\s+([\d,]+\.\d{2}(Cr)?)', line)
+            if line_match:
+                if current_desc:
+                    desc = clean_description(' '.join(current_desc))
+                    trans.append((current_date, desc, current_amount))
+                current_date = line_match.group(1)
+                current_desc = [line_match.group(2)]
+                amount_str = line_match.group(3).rstrip('Cr').replace(',', '')
+                sign = 1 if 'Cr' in line_match.group(3) else -1
+                current_amount = float(amount_str) * sign
+                continue
+            if 'balance' in line.lower():
+                continue
+            if current_date:
+                current_desc.append(line)
+        elif bank == 'hbz':
+            line_match = match(r'([A-Za-z]{3} \d{2}, \d{4})\s+(.*?)(\s+[\d,]+\.\d{2})?(\s+[\d,]+\.\d{2})?$', line)
+            if line_match:
+                if current_desc:
+                    desc = clean_description(' '.join(current_desc))
+                    trans.append((current_date, desc, current_amount))
+                current_date = line_match.group(1)
+                current_desc = [line_match.group(2)]
+                if line_match.group(3):
+                    amount_str = line_match.group(3).strip().replace(',', '')
+                    current_amount = -float(amount_str)
+                elif line_match.group(4):
+                    amount_str = line_match.group(4).strip().replace(',', '')
+                    current_amount = float(amount_str)
+                else:
+                    current_amount = 0.0
+                continue
+            ref_match = match(r'Reference: (.*?)(\s+[\d,]+\.\d{2})?$', line)
+            if ref_match and current_date:
+                if current_desc:
+                    desc = clean_description(' '.join(current_desc))
+                    trans.append((current_date, desc, current_amount))
+                current_desc = ['Reference: ' + ref_match.group(1)]
+                if ref_match.group(2):
+                    amount_str = ref_match.group(2).strip().replace(',', '')
+                    current_amount = -float(amount_str)
+                else:
+                    current_amount = 0.0
+                continue
+            if 'balance' in line.lower():
+                continue
+            if current_date:
+                current_desc.append(line)
+                if 'EFT' in line:
+                    current_amount = -current_amount
+        else:
+            date_match = match(r'^(\d{2} \d{2})', line)
+            if date_match:
+                if current_desc:
+                    desc = clean_description(' '.join(current_desc))
+                    trans.append((current_date, desc, current_amount))
+                current_date = date_match.group(1)
+                rest = line[date_match.end():]
+                amount_match = search(r'([\d,]+\.\d{2}-?)$', rest)
+                if amount_match:
+                    desc = rest[:amount_match.start()].strip()
+                    amount_str = amount_match.group(1).replace(',', '')
+                    sign = -1 if amount_str.endswith('-') else 1
+                    current_amount = float(amount_str.rstrip('-')) * sign
+                    current_desc = [desc]
+                else:
+                    current_desc = [rest.strip()]
+            elif current_date:
+                amount_match = search(r'([\d,]+\.\d{2}-?)$', line)
+                if amount_match:
+                    desc = line[:amount_match.start()].strip()
+                    amount_str = amount_match.group(1).replace(',', '')
+                    sign = -1 if amount_str.endswith('-') else 1
+                    current_amount = float(amount_str.rstrip('-')) * sign
+                    current_desc.append(desc)
+                else:
+                    current_desc.append(line)
     if current_desc:
         desc = clean_description(' '.join(current_desc))
         trans.append((current_date, desc, current_amount))
@@ -228,7 +305,7 @@ st.write("Upload your South African bank statement PDF (supports Standard Bank, 
 uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
 if uploaded_file is not None:
-    with st.spinner("Processing PDF... (may take time for scanned files)"):
+    with st.spinner("Processing PDF... (may take time for scanned or corrupt files)"):
         transactions = extract_and_parse_pdf(uploaded_file)
     if transactions:
         output = io.StringIO()
@@ -239,4 +316,4 @@ if uploaded_file is not None:
         st.success(f"Extracted {len(transactions)} transactions!")
         st.download_button("Download CSV", output.getvalue(), "bank_transactions.csv", "text/csv")
     else:
-        st.error("No transactions found. Ensure it's a valid bank statement or try another file.")
+        st.error("No transactions found. Ensure it's a valid bank statement or try another file. If the PDF is corrupt, repair it using tools like MuPDF's 'mutool clean'.")
