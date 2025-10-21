@@ -56,7 +56,7 @@ def process_table(table):
         return trans
     headers = [str(h).lower() if h else '' for h in table[0]]
     date_col = next((i for i, h in enumerate(headers) if 'date' in h), None)
-    desc_col = next((i for i, h in enumerate(headers) if 'detail' in h or 'descrip' in h or 'particular' in h), 0)
+    desc_col = next((i for i, h in enumerate(headers) if 'detail' in h or 'descrip' in h or 'particular' in h or 'history' in h), 0)
     debit_col = next((i for i, h in enumerate(headers) if 'debit' in h), None)
     credit_col = next((i for i, h in enumerate(headers) if 'credit' in h), None)
     amount_col = next((i for i, h in enumerate(headers) if 'amount' in h or 'transaction amount' in h), None)
@@ -67,10 +67,10 @@ def process_table(table):
         if not any(row):
             continue
         date = row[date_col].strip()
-        desc = row[desc_col].strip()
+        desc = row[desc_col].strip() if desc_col < len(row) else ''
         if not date or not desc:
             continue
-        if amount_col is not None:
+        if amount_col is not None and amount_col < len(row):
             amount_str = row[amount_col].replace(' ', '').strip()
             sign = -1 if amount_str.endswith('-') or 'Dr' in amount_str else 1
             amount_str = re.sub(r'[^\d.]', '', amount_str)  # Remove non-numbers
@@ -78,7 +78,7 @@ def process_table(table):
                 amount = float(amount_str) * sign
             except ValueError:
                 continue
-        elif debit_col is not None and credit_col is not None:
+        elif debit_col is not None and credit_col is not None and debit_col < len(row) and credit_col < len(row):
             debit_str = row[debit_col].replace(',', '').replace(' ', '').strip() or '0'
             credit_str = row[credit_col].replace(',', '').replace(' ', '').strip() or '0'
             try:
@@ -94,29 +94,35 @@ def process_table(table):
 def fallback_line_parser(text):
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     trans = []
-    desc_lines = []
     current_date = ''
+    current_desc = []
     current_amount = 0
+    in_transaction_history = False
     for line in lines:
-        # Detect date like '02 17' or 'Apr 02, 2024'
-        if re.match(r'^\d{2} \d{2}$', line) or re.match(r'^[A-Za-z]{3} \d{2}, \d{4}$', line):
-            if desc_lines:
-                desc = clean_description(' '.join(desc_lines))
+        # Detect start of transaction history (specific to ABSA)
+        if 'transaction history' in line.lower():
+            in_transaction_history = True
+            continue
+        if not in_transaction_history:
+            continue
+        # Detect date like '2 Sep 2024' or '02 17'
+        date_match = re.match(r'^(\d{1,2} [A-Za-z]{3} \d{4}|\d{2} \d{2})$', line)
+        if date_match:
+            if current_desc:
+                desc = clean_description(' '.join(current_desc))
                 trans.append((current_date, desc, current_amount))
-            current_date = line
-            desc_lines = []
-        # Detect amount like '1,500.00-' or '200,000.00'
-        elif re.match(r'^[\d,]+\.\d{2}[-]?$$', line):
+            current_date = date_match.group(0)
+            current_desc = []
+        # Detect amount like '4,000.00-' or '10,600.00'
+        elif re.match(r'^[\d,]+\.\d{2}[-]?$', line):
             sign = -1 if line.endswith('-') else 1
             amount_str = re.sub(r'[^\d.]', '', line)
             current_amount = float(amount_str) * sign
-        # Ignore balance (has comma and .09 like '115,633.09')
-        elif re.match(r'^\d{1,3}(?:,\d{3})*\.\d{2}$', line):
-            continue
-        else:
-            desc_lines.append(line)
-    if desc_lines:
-        desc = clean_description(' '.join(desc_lines))
+        # Detect description lines (anything else after date)
+        elif current_date and not re.match(r'^\d{1,3}(?:,\d{3})*\.\d{2}$', line):  # Exclude balance-like lines
+            current_desc.append(line)
+    if current_desc:
+        desc = clean_description(' '.join(current_desc))
         trans.append((current_date, desc, current_amount))
     return trans
 
